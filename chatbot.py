@@ -6,11 +6,13 @@ Phase 1: resolve tool calls (fast DB lookups, non-streamed)
 Phase 2: stream the final answer token by token
 
 Tools:
-  - search_company_matches: check if a company got any incentives
+  - search_company_matches       : check if a specific company got any incentives
   - get_top_matches_for_incentive: top 5 companies for a given incentive
-  - get_unmatched_companies: find companies with no incentive matches
-  - list_all_incentives: list all incentives
-  - get_incentive_details: full details of one incentive
+  - get_top_scoring_companies    : companies with highest scores across all incentives
+  - search_incentives_by_sector  : find incentives relevant to a sector/industry keyword
+  - get_unmatched_companies      : companies with no matches
+  - list_all_incentives          : list all incentives
+  - get_incentive_details        : full details of one incentive
 """
 
 import json
@@ -31,9 +33,9 @@ TOOLS = [
         "function": {
             "name": "search_company_matches",
             "description": (
-                "Check whether a specific company has been matched to any incentives. "
-                "Use this when the user asks about a specific company, e.g. "
-                "'Will DNR OBRAS get any incentive?' or 'What incentives does X qualify for?'"
+                "Check whether a specific named company has been matched to any incentives. "
+                "Use when the user asks about a specific company by name, e.g. "
+                "'Will DNR OBRAS get any incentive?' or 'What does DANIJO qualify for?'"
             ),
             "parameters": {
                 "type": "object",
@@ -67,10 +69,51 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_top_scoring_companies",
+            "description": (
+                "Get the companies with the highest match scores across all incentives. "
+                "Use when the user asks 'which companies scored highest?' or "
+                "'which companies are the best matches overall?'"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many top companies to return (default 10)",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_incentives_by_sector",
+            "description": (
+                "Find incentives relevant to a sector, industry, or type of company. "
+                "Use when the user asks 'what incentives exist for X sector?' or "
+                "'is there anything for construction/textile/tech companies?'"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sector_keyword": {
+                        "type": "string",
+                        "description": "Sector or industry keyword e.g. 'construction', 'textile', 'tech', 'agriculture'",
+                    }
+                },
+                "required": ["sector_keyword"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_unmatched_companies",
             "description": (
-                "Find companies in the database that were NOT matched to any incentive. "
-                "Use when user asks 'which companies won't get incentives?' or similar."
+                "Find companies that were NOT matched to any incentive. "
+                "Use when user asks 'which companies won't get incentives?'"
             ),
             "parameters": {
                 "type": "object",
@@ -89,6 +132,27 @@ TOOLS = [
             "name": "list_all_incentives",
             "description": "List all available public incentives with basic info.",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_incentives_by_field",
+            "description": (
+                "Search incentives by any field: managing entity, program name, type, deadline, or any keyword. "
+                "Use when user asks 'which incentives are managed by X?' or 'list Portugal 2030 programs' "
+                "or 'what incentives have rolling deadlines?' or any question filtering incentives by a property."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "Keyword to search across all incentive fields",
+                    }
+                },
+                "required": ["keyword"],
+            },
         },
     },
     {
@@ -131,7 +195,7 @@ def search_company_matches(company_name: str) -> str:
     conn.close()
 
     if not rows:
-        return f"NO_MATCH: No incentive matches found for '{company_name}'. The company either was not in the top 5 for any incentive, or the name does not exist in the database."
+        return f"NO_MATCH: '{company_name}' was not matched to any incentive. It was not in the top 5 for any program."
 
     result = f"MATCHED: '{rows[0][0]}' qualified for {len(rows)} incentive(s):\n"
     for row in rows:
@@ -167,6 +231,88 @@ def get_top_matches_for_incentive(incentive_query: str) -> str:
     return result
 
 
+def get_top_scoring_companies(limit: int = 10) -> str:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT company_name, MAX(score) as top_score, COUNT(*) as num_incentives,
+               STRING_AGG(i.incentive_name, ', ' ORDER BY score DESC) as incentives
+        FROM matches m
+        JOIN incentives i ON m.incentive_id = i.incentive_id
+        GROUP BY company_name
+        ORDER BY top_score DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return "No match data found."
+
+    result = f"Top {len(rows)} highest-scoring companies across all incentives:\n"
+    for i, row in enumerate(rows, 1):
+        result += f"\n{i}. {row[0]}\n   Top score: {row[1]}/10 | Matched {row[2]} incentive(s)\n   Programs: {row[3][:120]}\n"
+    return result
+
+
+def search_incentives_by_sector(sector_keyword: str) -> str:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Direct matches: incentive specifically mentions this sector
+    cur.execute(
+        """
+        SELECT incentive_id, incentive_name, eligible_sectors,
+               max_funding_eur, type
+        FROM incentives
+        WHERE LOWER(eligible_sectors) LIKE %s
+           OR LOWER(eligible_activities) LIKE %s
+           OR LOWER(eligible_company_types) LIKE %s
+        ORDER BY incentive_id
+        """,
+        (f"%{sector_keyword.lower()}%",) * 3,
+    )
+    direct_rows = cur.fetchall()
+    direct_ids = {r[0] for r in direct_rows}
+
+    # General matches: open to all sectors (exclude already found ones)
+    exclusion = tuple(direct_ids) if direct_ids else ("__none__",)
+    cur.execute(
+        f"""
+        SELECT incentive_id, incentive_name, eligible_sectors,
+               max_funding_eur, type
+        FROM incentives
+        WHERE LOWER(eligible_sectors) LIKE '%%all sectors%%'
+          AND incentive_id NOT IN %s
+        ORDER BY incentive_id
+        """,
+        (exclusion,),
+    )
+    general_rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not direct_rows and not general_rows:
+        return f"No incentives found for '{sector_keyword}' sector."
+
+    result = ""
+    if direct_rows:
+        result += f"Incentives specifically targeting '{sector_keyword}':\n"
+        for row in direct_rows:
+            result += f"\n- {row[0]}: {row[1]} | {row[4]} | Max: {row[3]}\n  Sectors: {row[2]}\n"
+
+    if general_rows:
+        result += f"\nIncentives open to ALL sectors (including {sector_keyword}):\n"
+        for row in general_rows:
+            result += f"\n- {row[0]}: {row[1]} | {row[4]} | Max: {row[3]}\n"
+
+    return result
+
+
 def get_unmatched_companies(limit: int = 10) -> str:
     conn = get_connection()
     cur = conn.cursor()
@@ -183,8 +329,7 @@ def get_unmatched_companies(limit: int = 10) -> str:
     rows = cur.fetchall()
     cur.execute(
         """
-        SELECT COUNT(*)
-        FROM companies c
+        SELECT COUNT(*) FROM companies c
         LEFT JOIN matches m ON LOWER(c.company_name) = LOWER(m.company_name)
         WHERE m.company_name IS NULL
         """
@@ -244,14 +389,49 @@ def get_incentive_details(incentive_query: str) -> str:
     return "\n".join([f"{k}: {v}" for k, v in data.items()])
 
 
+def search_incentives_by_field(keyword: str) -> str:
+    """Search incentives by any field — manager, program, type, deadline etc."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT incentive_id, incentive_name, managing_entity, program,
+               type, max_funding_eur, deadline
+        FROM incentives
+        WHERE LOWER(incentive_name) LIKE %s
+           OR LOWER(managing_entity) LIKE %s
+           OR LOWER(program) LIKE %s
+           OR LOWER(type) LIKE %s
+           OR LOWER(deadline) LIKE %s
+           OR LOWER(description) LIKE %s
+        ORDER BY incentive_id
+        """,
+        (f"%{keyword.lower()}%",) * 6,
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return f"No incentives found matching '{keyword}'."
+
+    result = "Incentives matching '" + keyword + "' (" + str(len(rows)) + " found):\n"
+    for row in rows:
+        result += f"\n- {row[0]}: {row[1]}\n  Manager: {row[2]} | Program: {row[3]} | Type: {row[4]} | Max: {row[5]} | Deadline: {row[6]}\n"
+    return result
+
+
 # ── Tool dispatcher ──────────────────────────────────────────────────────────
 
 TOOL_MAP = {
     "search_company_matches": search_company_matches,
     "get_top_matches_for_incentive": get_top_matches_for_incentive,
+    "get_top_scoring_companies": get_top_scoring_companies,
+    "search_incentives_by_sector": search_incentives_by_sector,
     "get_unmatched_companies": get_unmatched_companies,
     "list_all_incentives": list_all_incentives,
     "get_incentive_details": get_incentive_details,
+    "search_incentives_by_field": search_incentives_by_field,
 }
 
 
@@ -267,19 +447,25 @@ def _call_tool(name: str, args: dict) -> str:
 SYSTEM_PROMPT = """You are a helpful assistant for HomoDeus, a Portuguese AI company.
 You help users explore public incentives and which companies are best matched to them.
 
-You have access to tools to query a database of matches between Portuguese companies
-and public funding incentive programs.
+You have tools to query a live database. Always call a tool — never guess from memory.
 
-STRICT RESPONSE RULES:
-- Always call a tool before answering — never guess from memory.
-- Match response length to the question:
-  * Yes/no questions (e.g. "will X get an incentive?") -> answer YES or NO in the first sentence, then add one short follow-up line. Offer to give more detail if wanted.
-  * "List" questions -> short bullet list only, no extra commentary.
-  * "Tell me about X" -> brief structured summary, 3-5 lines max.
-- Never dump raw scores, IDs, or long justifications unless the user explicitly asks for details.
-- If a company has no matches, say so clearly in one sentence and explain why (not in top 5 for any incentive).
-- If the user asks "which companies won't get incentives?" use the get_unmatched_companies tool.
-- Always end with a short offer to dig deeper if relevant.
+TOOL ROUTING:
+- User asks about a specific company by name → search_company_matches
+- User asks which companies scored highest / best overall → get_top_scoring_companies
+- User asks what incentives exist for a sector (textile, construction, tech...) → search_incentives_by_sector
+- User asks which companies qualified for a specific incentive → get_top_matches_for_incentive
+- User asks which companies won't get incentives → get_unmatched_companies
+- User asks to list all incentives → list_all_incentives
+- User asks for details about a specific incentive → get_incentive_details
+- User asks about incentives by manager, program, type, or any other property → search_incentives_by_field
+
+RESPONSE RULES:
+- Match response length to the question. Yes/no → one sentence first, then brief detail.
+- Never dump raw data. Summarise in plain English.
+- If nothing is found, say so clearly and suggest what the user can try instead.
+- End with a short offer to dig deeper when relevant.
+- When the tool returns two groups (specific sector matches AND all-sector matches), ALWAYS present them as two separate sections with clear headers like "Specifically for [sector]:" and "Open to all sectors (also applies):". Never merge them into one flat list.
+- CRITICAL: NEVER answer questions about incentives or companies from your own memory. The database is the only source of truth. Always call a tool first, even if you think you know the answer.
 """
 
 
@@ -287,9 +473,7 @@ STRICT RESPONSE RULES:
 
 def chat(user_input: str, history: list[dict]) -> tuple[str, list[dict]]:
     """
-    Single turn of the agent loop with streaming final response.
-    Phase 1: resolve all tool calls (fast DB lookups)
-    Phase 2: stream the final answer token by token
+    Single turn: resolve tool calls first, then stream the final answer.
     """
     history.append({"role": "user", "content": user_input})
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
@@ -304,26 +488,17 @@ def chat(user_input: str, history: list[dict]) -> tuple[str, list[dict]]:
             temperature=0.2,
         )
         msg = response.choices[0].message
-
         if not msg.tool_calls:
             break
-
         messages.append(msg)
         for tc in msg.tool_calls:
             args = json.loads(tc.function.arguments)
             result = _call_tool(tc.function.name, args)
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
-                }
-            )
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
-    # Phase 2: stream the final answer
+    # Phase 2: stream final answer
     print("\nAssistant: ", end="", flush=True)
     full_reply = ""
-
     stream = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
@@ -346,11 +521,11 @@ def run_chatbot():
     print("  HomoDeus — Public Incentives Q&A Agent")
     print("  Type 'quit' to exit, 'clear' to reset conversation")
     print("=" * 60 + "\n")
-    print("Example questions:")
-    print("  - Will DNR OBRAS get any incentive?")
-    print("  - Which companies qualified for SIFIDE II?")
+    print("Try asking:")
+    print("  - Which companies scored highest overall?")
+    print("  - Is there any incentive for construction companies?")
+    print("  - Will DANIJO get any incentive?")
     print("  - Which companies won't get any incentive?")
-    print("  - Tell me about the Startup Voucher program")
     print()
 
     history = []

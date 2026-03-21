@@ -98,38 +98,44 @@ def setup_database(
 
     conn.commit()
 
-    # --- Load data only if tables are empty ---
-    cur.execute("SELECT COUNT(*) FROM companies;")
-    company_count = cur.fetchone()[0]
-
-    if company_count == 0:
-        print(f"Loading companies from {companies_csv}...")
-        df = pd.read_csv(companies_csv, dtype=str).fillna("")
-        rows = [
-            (
-                row["company_name"],
-                row["cae_primary_label"],
-                row["trade_description_native"],
-                row.get("website", ""),
-            )
-            for _, row in df.iterrows()
-        ]
+    
+    # Companies: insert only new ones (by name)
+    print(f"Syncing companies from {companies_csv}...")
+    df_companies = pd.read_csv(companies_csv, dtype=str).fillna("")
+    cur.execute("SELECT company_name FROM companies;")
+    existing_companies = {row[0] for row in cur.fetchall()}
+    new_companies = [
+        (
+            row["company_name"],
+            row["cae_primary_label"],
+            row["trade_description_native"],
+            row.get("website", ""),
+        )
+        for _, row in df_companies.iterrows()
+        if row["company_name"] not in existing_companies
+    ]
+    if new_companies:
         execute_values(
             cur,
             "INSERT INTO companies (company_name, cae_primary_label, trade_description_native, website) VALUES %s",
-            rows,
+            new_companies,
             page_size=1000,
         )
         conn.commit()
-        print(f"  Loaded {len(rows):,} companies.")
+        print(f"  Added {len(new_companies):,} new companies ({len(existing_companies):,} already existed).")
     else:
-        print(f"  Companies already loaded ({company_count:,} rows). Skipping.")
+        print(f"  Companies up to date ({len(existing_companies):,} rows).")
 
-    cur.execute("SELECT COUNT(*) FROM incentives;")
-    if cur.fetchone()[0] == 0:
-        print(f"Loading incentives from {incentives_csv}...")
-        df = pd.read_csv(incentives_csv, dtype=str).fillna("")
-        rows = [tuple(row) for _, row in df.iterrows()]
+    # Incentives: upsert by incentive_id
+    print(f"Syncing incentives from {incentives_csv}...")
+    df_incentives = pd.read_csv(incentives_csv, dtype=str).fillna("")
+    cur.execute("SELECT incentive_id FROM incentives;")
+    existing_incentives = {row[0] for row in cur.fetchall()}
+    new_incentives = [
+        tuple(row) for _, row in df_incentives.iterrows()
+        if row["incentive_id"] not in existing_incentives
+    ]
+    if new_incentives:
         execute_values(
             cur,
             """INSERT INTO incentives
@@ -137,26 +143,35 @@ def setup_database(
                 max_funding_eur, funding_rate_pct, eligible_company_types,
                 eligible_sectors, eligible_activities, deadline, description)
                VALUES %s""",
-            rows,
+            new_incentives,
         )
         conn.commit()
-        print(f"  Loaded {len(rows)} incentives.")
+        print(f"  Added {len(new_incentives)} new incentive(s).")
+    else:
+        print(f"  Incentives up to date ({len(existing_incentives)} rows).")
 
-    cur.execute("SELECT COUNT(*) FROM use_cases;")
-    if cur.fetchone()[0] == 0:
-        print(f"Loading use cases from {use_cases_csv}...")
-        df = pd.read_csv(use_cases_csv, dtype=str).fillna("")
-        rows = [tuple(row) for _, row in df.iterrows()]
+    # Use cases: upsert by use_case_id
+    print(f"Syncing use cases from {use_cases_csv}...")
+    df_use_cases = pd.read_csv(use_cases_csv, dtype=str).fillna("")
+    cur.execute("SELECT use_case_id FROM use_cases;")
+    existing_use_cases = {row[0] for row in cur.fetchall()}
+    new_use_cases = [
+        tuple(row) for _, row in df_use_cases.iterrows()
+        if row["use_case_id"] not in existing_use_cases
+    ]
+    if new_use_cases:
         execute_values(
             cur,
             """INSERT INTO use_cases
                (use_case_id, use_case_name, description, target_industries,
                 typical_roi, typical_timeline, product_platform)
                VALUES %s""",
-            rows,
+            new_use_cases,
         )
         conn.commit()
-        print(f"  Loaded {len(rows)} use cases.")
+        print(f"  Added {len(new_use_cases)} new use case(s).")
+    else:
+        print(f"  Use cases up to date ({len(existing_use_cases)} rows.")
 
     cur.close()
     conn.close()
