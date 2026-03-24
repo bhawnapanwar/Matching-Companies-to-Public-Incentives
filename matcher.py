@@ -3,7 +3,7 @@ matcher.py — Core matching logic with RAG-style semantic search.
 
 Strategy (HyDE + Pure Vector Search):
   1. Load pre-computed company embeddings (fast numpy matrix).
-  2. For each incentive, use an LLM to generate a hypothetical "Ideal Company Profile" (HyDE).
+  2. For each incentive, use an LLM to generate a hypothetical Ideal Company Profile(HyDE).
   3. Embed that ONE ideal profile using OpenAI text-embedding-3-small.
   4. Perform pure vector matrix multiplication against all 250k companies instantly.
   5. Fetch the top 80 companies from the DB.
@@ -92,20 +92,19 @@ def _fetch_companies_by_ids(company_ids: list[int]) -> list[dict]:
         for r in rows
     }
     
-    # Return them in the exact order requested by the vector search
+    
     return [company_dict[cid] for cid in company_ids if cid in company_dict]
 
 def _get_candidates_rag(incentive: dict, embeddings_matrix: np.ndarray, ids_array: np.ndarray) -> list[dict]:
     """True semantic search across the entire dataset in milliseconds."""
     
-    # 1. Align the vector space (HyDE)
+    # 1. Align the vector space 
     ideal_text = _generate_ideal_profile(incentive)
     
     # 2. Embed the ideal company
     ideal_vector = _embed(ideal_text)
     
     # 3. Vector search across ALL companies instantly
-    # Normalize query (matrix is assumed to be normalized or we do dot product if OpenAI already normalizes)
     ideal_vector_norm = ideal_vector / np.linalg.norm(ideal_vector)
     matrix_norm = embeddings_matrix / np.linalg.norm(embeddings_matrix, axis=1, keepdims=True)
     
@@ -231,7 +230,7 @@ def run_matching(output_csv: str = "matches_output.csv"):
     conn.close()
 
     print(f"\nMatching {len(incentives)} incentives with {MAX_WORKERS} parallel workers...")
-    print(f"Strategy: HyDE Translation + Pure Vector Search + LLM Re-ranking\n")
+
     start_time = time.time()
     all_results = []
 
@@ -245,7 +244,7 @@ def run_matching(output_csv: str = "matches_output.csv"):
         for future in as_completed(futures):
             all_results.extend(future.result())
 
-    # 3. Save to DB — delete + all inserts in a single transaction
+    # 3. Save to DB and export CSV
     print("\nSaving to database...")
     conn = get_connection()
     cur = conn.cursor()
@@ -286,6 +285,6 @@ def run_matching(output_csv: str = "matches_output.csv"):
     print(f"   Embedding tokens:   {_total_tokens['embedding']:,}  (${embed_cost:.4f})")
     print(f"   Prompt tokens:      {_total_tokens['prompt']:,}  (${prompt_cost:.4f})")
     print(f"   Completion tokens:  {_total_tokens['completion']:,}  (${completion_cost:.4f})")
-    print(f"   Total Phase 2 Cost: ${total_cost:.4f} USD")
+    print(f"   Total Matching Cost: ${total_cost:.4f} USD")
 
     return df

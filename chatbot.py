@@ -1,10 +1,6 @@
 """
 chatbot.py — Conversational Q&A interface over the matches database.
 
-Architecture: tool-calling agent loop with streaming output.
-Upgrades: 
-  - True Semantic Search: Uses pre-computed embeddings to find companies by description.
-  - LLM-driven filtering: Fetches raw sector data and lets the LLM reason about semantic matches.
 """
 
 import json
@@ -360,7 +356,7 @@ def chat(user_input: str, history: list[dict]) -> tuple[str, list[dict]]:
     history.append({"role": "user", "content": user_input})
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
 
-    # Phase 1: resolve tool calls
+    
     while True:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -378,7 +374,7 @@ def chat(user_input: str, history: list[dict]) -> tuple[str, list[dict]]:
             result = _call_tool(tc.function.name, args)
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
-    # Phase 2: stream final answer
+    
     print("\nAssistant: ", end="", flush=True)
     full_reply = ""
     stream = client.chat.completions.create(

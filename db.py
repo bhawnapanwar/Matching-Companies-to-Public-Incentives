@@ -53,14 +53,13 @@ def embed_and_save_companies():
         cae = row[1] or ""
         desc = row[2] or ""
         
-        # STRICT TRUNCATION: This keeps it under ~30 tokens per company.
-        # 250k companies * 30 tokens = 7.5M tokens ($0.15 total cost)
+        
         text = f"Sector: {cae} | Activity: {desc[:100]}"
         
         company_ids.append(comp_id)
         texts_to_embed.append(text)
 
-    # Batch embed using OpenAI (Limit is 2048 per batch)
+    # Batch embed using OpenAI 
     all_embeddings = []
     BATCH_SIZE = 2000 
     MAX_RETRIES = 3
@@ -80,7 +79,7 @@ def embed_and_save_companies():
                 )
                 batch_embeddings = [item.embedding for item in response.data]
                 all_embeddings.extend(batch_embeddings)
-                break  # Success! Break out of the retry loop and move to the next batch
+                break  
                 
             except Exception as e:
                 print(f"    [!] Error on batch {batch_num}: {e}")
@@ -174,7 +173,7 @@ def setup_database(
         );
     """)
 
-    # Add indexes for performance (safe to run multiple times)
+    # Add indexes for performance 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_companies_cae ON companies(cae_primary_label);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_companies_trade ON companies USING gin(to_tsvector('simple', trade_description_native));")
     conn.commit()
@@ -259,7 +258,7 @@ def setup_database(
 
     embeddings_exist = os.path.exists('company_embeddings.npy') and os.path.exists('company_ids.npy')
 
-    # Run if forced, if there's new data, OR if the files are missing
+    
     if force_reload or new_companies or not embeddings_exist: 
         embed_and_save_companies()
     else:
