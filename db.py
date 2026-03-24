@@ -4,13 +4,17 @@ Creates PostgreSQL tables and loads CSV data.
 """
 
 import os
+import time
 import psycopg2
 import pandas as pd
+import numpy as np
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv()
 
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def get_connection():
     """Return a new PostgreSQL connection using environment variables."""
@@ -22,6 +26,80 @@ def get_connection():
         password=os.getenv("DB_PASSWORD", ""),
     )
 
+def embed_and_save_companies():
+    """
+    Fetches all companies, creates a strict, short string for each to minimize costs,
+    embeds them in batches, and saves the vectors to disk.
+    """
+    print("Generating and saving company embeddings (this may take a few minutes)...")
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Fetch all companies
+    cur.execute("SELECT id, cae_primary_label, trade_description_native FROM companies ORDER BY id;")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        print("No companies found to embed.")
+        return
+
+    company_ids = []
+    texts_to_embed = []
+
+    for row in rows:
+        comp_id = row[0]
+        cae = row[1] or ""
+        desc = row[2] or ""
+        
+        # STRICT TRUNCATION: This keeps it under ~30 tokens per company.
+        # 250k companies * 30 tokens = 7.5M tokens ($0.15 total cost)
+        text = f"Sector: {cae} | Activity: {desc[:100]}"
+        
+        company_ids.append(comp_id)
+        texts_to_embed.append(text)
+
+    # Batch embed using OpenAI (Limit is 2048 per batch)
+    all_embeddings = []
+    BATCH_SIZE = 2000 
+    MAX_RETRIES = 3
+
+    for i in range(0, len(texts_to_embed), BATCH_SIZE):
+        batch = texts_to_embed[i: i + BATCH_SIZE]
+        batch_num = i // BATCH_SIZE + 1
+        total_batches = (len(texts_to_embed) // BATCH_SIZE) + 1
+        print(f"  Embedding batch {batch_num} / {total_batches}...")
+        
+        # Retry logic for OpenAI Server Errors
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = client.embeddings.create(
+                    model="text-embedding-3-small",
+                    input=batch
+                )
+                batch_embeddings = [item.embedding for item in response.data]
+                all_embeddings.extend(batch_embeddings)
+                break  # Success! Break out of the retry loop and move to the next batch
+                
+            except Exception as e:
+                print(f"    [!] Error on batch {batch_num}: {e}")
+                if attempt < MAX_RETRIES - 1:
+                    sleep_time = (attempt + 1) * 2
+                    print(f"    Retrying in {sleep_time} seconds...")
+                    time.sleep(sleep_time)
+                else:
+                    print("    Max retries reached. Crashing gracefully.")
+                    raise e
+
+    # Convert to fast numpy arrays and save
+    embeddings_matrix = np.array(all_embeddings, dtype=np.float32)
+    ids_array = np.array(company_ids, dtype=np.int32)
+
+    np.save('company_embeddings.npy', embeddings_matrix)
+    np.save('company_ids.npy', ids_array)
+
+    print(f"Successfully saved {len(company_ids)} embeddings to company_embeddings.npy")
 
 def setup_database(
     companies_csv: str,
@@ -96,9 +174,11 @@ def setup_database(
         );
     """)
 
+    # Add indexes for performance (safe to run multiple times)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_companies_cae ON companies(cae_primary_label);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_companies_trade ON companies USING gin(to_tsvector('simple', trade_description_native));")
     conn.commit()
 
-    
     # Companies: insert only new ones (by name)
     print(f"Syncing companies from {companies_csv}...")
     df_companies = pd.read_csv(companies_csv, dtype=str).fillna("")
@@ -176,3 +256,11 @@ def setup_database(
     cur.close()
     conn.close()
     print("Database setup complete.")
+
+    embeddings_exist = os.path.exists('company_embeddings.npy') and os.path.exists('company_ids.npy')
+
+    # Run if forced, if there's new data, OR if the files are missing
+    if force_reload or new_companies or not embeddings_exist: 
+        embed_and_save_companies()
+    else:
+        print("Company embeddings already exist on disk. Skipping generation.")
