@@ -16,7 +16,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ── 1. Load Embeddings for Semantic Search ───────────────────────────────────
 try:
-    print("Loading AI embeddings for semantic search...")
+    
     EMBEDDINGS_MATRIX = np.load('company_embeddings.npy')
     COMPANY_IDS = np.load('company_ids.npy')
 except FileNotFoundError:
@@ -45,6 +45,17 @@ TOOLS = [
                 },
                 "required": ["description"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_unmatched_companies",
+            "description": (
+                "Find companies that were NOT matched to any incentive in the database. "
+                "Use when user asks 'which companies won't get incentives?' or 'who didn't match anything?'"
+            ),
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -182,6 +193,41 @@ def find_companies_by_description(description: str) -> str:
                 
     return result
 
+def get_unmatched_companies() -> str:
+    conn = get_connection()
+    cur = conn.cursor()
+    
+    # We can do a super fast join now using company_id!
+    cur.execute(
+        """
+        SELECT c.company_name, c.cae_primary_label
+        FROM companies c
+        LEFT JOIN matches m ON c.id = m.company_id
+        WHERE m.company_id IS NULL
+        LIMIT 10
+        """
+    )
+    rows = cur.fetchall()
+    
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM companies c
+        LEFT JOIN matches m ON c.id = m.company_id
+        WHERE m.company_id IS NULL
+        """
+    )
+    total = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return "All companies in the database have at least one incentive match."
+
+    result = f"There are {total:,} companies in the database with no incentive match. Here are 10 examples:\n"
+    for row in rows:
+        result += f"\n- {row[0]} (Sector: {row[1]})\n"
+    return result
+
 def search_incentives_by_sector() -> str:
     """Dumps all sector rules so the LLM can semantically filter them."""
     conn = get_connection()
@@ -307,8 +353,12 @@ def get_incentive_details(incentive_query: str) -> str:
     conn.close()
 
     if not row:
-        return f"Incentive '{incentive_query}' not found."
-
+        return (
+            f"ERROR: Incentive '{incentive_query}' not found. "
+            "Do not tell the user it doesn't exist yet! "
+            "Call the `list_all_incentives` tool right now to find the correct exact name or ID, "
+            "and then call `get_incentive_details` again with the correct ID."
+        )
     data = dict(zip(cols, row))
     return "\n".join([f"{k}: {v}" for k, v in data.items()])
 
@@ -316,6 +366,7 @@ def get_incentive_details(incentive_query: str) -> str:
 
 TOOL_MAP = {
     "find_companies_by_description": find_companies_by_description,
+    "get_unmatched_companies": get_unmatched_companies,
     "search_company_matches": search_company_matches,
     "get_top_matches_for_incentive": get_top_matches_for_incentive,
     "search_incentives_by_sector": search_incentives_by_sector,
