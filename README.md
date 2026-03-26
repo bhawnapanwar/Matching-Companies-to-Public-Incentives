@@ -60,31 +60,32 @@ python run.py chat
  
 # Or run everything in sequence
 python run.py all
+
 ```
- 
----
- 
- 
 ## Output
  
 - `matches_output.csv` — All matches with scores and justifications
+- `company_embeddings.npy`: A massive matrix containing the 1,536-dimensional vector coordinates for every company. This allows the system to perform real-time semantic search (Cosine Similarity) across a quarter-million rows entirely in local RAM.
+- `company_ids.npy`: The index that perfectly aligns the vector matrix back to the exact PostgreSQL database IDs, ensuring the fast math can be seamlessly joined back to the relational data.
+ 
 
+## Architecture
+---
+ Setup (one-time):
+  CSV → PostgreSQL → embed all 250k companies → save matrix to disk
+
+Match (fast, repeatable):
+  load matrix from disk → HyDE query generation → cosine similarity
+  → top 80 candidates → LLM re-rank → top 5 per incentive → CSV
+
+Chat:
+  user question → tool routing → DB query → stream answer
  
 ---
- 
-## Architecture Decisions
- 
-| Decision | Rationale |
-|---|---|
-| PostgreSQL | Required by spec; handles 250k companies efficiently |
-| SQL pre-filter before LLM | 250k companies × 20 incentives = too expensive to score all. SQL narrows to ~80 candidates per incentive first |
-| gpt-4o-mini | Cost-efficient for structured scoring; ~$0.01 total for full run |
-| Batched LLM calls | One LLM call per incentive (20 total), not per company pair |
-| Tool-calling chatbot | Agent loop allows multi-turn reasoning with DB lookups |
- 
----
- 
+
+
 ## Cost
- 
-Full matching run (20 incentives × 80 candidates): **< $0.05 USD**
+
+Total run cost: **< $0.30 USD**
+
 
